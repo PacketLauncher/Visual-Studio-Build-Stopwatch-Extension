@@ -10,7 +10,7 @@ November 6, 2026
 ## Requirements
 
 - Windows 10 or Windows 11
-- Visual Studio 2026
+- Visual Studio 2026 (may work in previous versions but not tested)
 - No Python installation required
 
 **Note:** Visual Studio 2026 is the intended release target. Compatibility with earlier Visual Studio versions has not been tested.
