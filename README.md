@@ -3,6 +3,10 @@
 A lightweight Windows system tray utility that displays live build timers for Visual Studio solutions and projects.
 
 ## Changelog
+v1.0.0.1
+November 6, 2026
+- Fixed Solution and project build timers to follow their respective font settings, including font family, size, and style (Regular, Bold, Italic, or Bold Italic).
+
 v1.0.0.0
 November 6, 2026
 - Initial release.

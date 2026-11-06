@@ -473,7 +473,7 @@ class StopwatchApp:
         return 0, 0, self.root.winfo_screenwidth(), self.root.winfo_screenheight()
 
     def refresh_layout(self):
-        font_points, _, base_width = SIZES[self.settings['size']]
+        _, _, base_width = SIZES[self.settings['size']]
         position = self.settings['position']
         scale = float(self.root.winfo_fpixels('1p')) * 72.0 / 96.0
         margin, gap = round(16 * scale), round(7 * scale)
@@ -488,7 +488,6 @@ class StopwatchApp:
                                slant='italic' if 'Italic' in style else 'roman')
         regular = make_font('project_font')
         heading = make_font('solution_font')
-        clock_font = tkfont.Font(root=self.root, family='Segoe UI', size=font_points, weight='bold')
         heights = []
         for group_id, group in self.groups.items():
             total_height = 0
@@ -503,8 +502,8 @@ class StopwatchApp:
                 build['row'].pack_propagate(False)
                 build['label'].config(font=font)
                 build['status'].config(font=font, padx=0)
-                build['clock'].config(font=clock_font, padx=0)
-                clock_width = clock_font.measure('00:00:00')
+                build['clock'].config(font=font, padx=0)
+                clock_width = font.measure('00:00:00')
                 remaining = max(20, width - 2 * pad_x - clock_width -
                                 font.measure('●') - round(28 * scale))
                 label = build['project']
