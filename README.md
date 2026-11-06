@@ -35,7 +35,8 @@ The stopwatch automatically displays:
 - A timer for the solution build.
 - Individual timers for projects being built.
 - Build success or failure indicators.
-- Optional notification sounds when a solution build completes.
+- Optional notification sounds* when a solution build completes.
+* The released package already contains 2 gained versions of built-in Windows sounds for your convenience.
 
 The overlay disappears after the configured delay.
 
@@ -88,7 +89,13 @@ python -m pip install pyinstaller
 * If installing pygame gives an error, try this instead:
 python -m pip install --only-binary=:all: pygame-ce
 
-3. Create the EXE either by running the BuildMe.bat script, or from CMD by running:
-python -m PyInstaller --onefile --windowed --clean --name "Visual Studio Build Stopwatch" --icon "VS_Build_Stopwatch.ico" --add-data "VS_Build_Stopwatch.ico;." --collect-all pygame --hidden-import pystray._win32 "VS_Build_Stopwatch.py"
+3. Before creating the EXE, you may want to update its release number to showing in both the EXE details and in the program's About section. To doing so, edit the version_info.txt file and make sure to update ALL 4 lines accordingly before compiling the EXE:
+	- filevers=(1, 0, 0, 0),
+    - prodvers=(1, 0, 0, 0)
+	- StringStruct('FileVersion', '1.0.0.0'),
+	- StringStruct('ProductVersion', '1.0.0.0')
 
-* You may use the Build_Leftovers_CleanUp.bat script for cleaning up any leftovers afterwards.
+4. Create the EXE either by running the BuildMe.bat script, or from CMD by running:
+python -m PyInstaller --onefile --windowed --clean --name "Visual Studio Build Stopwatch" --icon "VS_Build_Stopwatch.ico" --add-data "VS_Build_Stopwatch.ico;." --version-file "version_info.txt" --collect-all pygame --hidden-import pystray._win32 "VS_Build_Stopwatch.py"
+
+5. Once you're done, you may use the Build_Leftovers_CleanUp.bat script for cleaning up any VS and Python leftovers afterwards.

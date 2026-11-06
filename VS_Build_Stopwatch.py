@@ -2,6 +2,7 @@ import ctypes
 import json
 import os
 import queue
+import re
 import sys
 import threading
 import time
@@ -21,7 +22,6 @@ import pywintypes
 PIPE_NAME = r"\\.\pipe\VSBuildStopwatch"
 
 APP_NAME = 'Visual Studio Build Stopwatch'
-APP_VERSION = '1.0.0'
 GITHUB_URL = 'https://github.com/packetlauncher'
 CONFIG_DIR = Path(os.environ.get('APPDATA', str(Path.home()))) / 'VSBuildStopwatch'
 CONFIG_PATH = CONFIG_DIR / 'settings.json'
@@ -151,6 +151,68 @@ def resource_path(filename):
     # Works both when running the .py and when packaged using PyInstaller.
     base = Path(getattr(sys, '_MEIPASS', Path(__file__).resolve().parent))
     return base / filename
+
+
+
+def get_app_version():
+    """Read the version_info.txt source metadata or the EXE's embedded version."""
+    if getattr(sys, 'frozen', False) and os.name == 'nt':
+        # PyInstaller embeds version_info.txt as a Windows VERSIONINFO resource.
+        try:
+            from ctypes import wintypes
+
+            class VS_FIXEDFILEINFO(ctypes.Structure):
+                _fields_ = [
+                    ('dwSignature', wintypes.DWORD),
+                    ('dwStrucVersion', wintypes.DWORD),
+                    ('dwFileVersionMS', wintypes.DWORD),
+                    ('dwFileVersionLS', wintypes.DWORD),
+                    ('dwProductVersionMS', wintypes.DWORD),
+                    ('dwProductVersionLS', wintypes.DWORD),
+                    ('dwFileFlagsMask', wintypes.DWORD),
+                    ('dwFileFlags', wintypes.DWORD),
+                    ('dwFileOS', wintypes.DWORD),
+                    ('dwFileType', wintypes.DWORD),
+                    ('dwFileSubtype', wintypes.DWORD),
+                    ('dwFileDateMS', wintypes.DWORD),
+                    ('dwFileDateLS', wintypes.DWORD),
+                ]
+
+            version = ctypes.windll.version
+            version.GetFileVersionInfoSizeW.argtypes = [wintypes.LPCWSTR, ctypes.POINTER(wintypes.DWORD)]
+            version.GetFileVersionInfoSizeW.restype = wintypes.DWORD
+            version.GetFileVersionInfoW.argtypes = [wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD, ctypes.c_void_p]
+            version.GetFileVersionInfoW.restype = wintypes.BOOL
+            version.VerQueryValueW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR,
+                                               ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(wintypes.UINT)]
+            version.VerQueryValueW.restype = wintypes.BOOL
+            dummy = wintypes.DWORD(0)
+            size = version.GetFileVersionInfoSizeW(sys.executable, ctypes.byref(dummy))
+            if size:
+                data = ctypes.create_string_buffer(size)
+                if version.GetFileVersionInfoW(sys.executable, 0, size, data):
+                    pointer = ctypes.c_void_p()
+                    length = wintypes.UINT(0)
+                    if version.VerQueryValueW(data, '\\', ctypes.byref(pointer), ctypes.byref(length)) and length.value >= ctypes.sizeof(VS_FIXEDFILEINFO):
+                        info = ctypes.cast(pointer, ctypes.POINTER(VS_FIXEDFILEINFO)).contents
+                        if info.dwSignature == 0xFEEF04BD:
+                            return '{}.{}.{}.{}'.format(info.dwFileVersionMS >> 16,
+                                                          info.dwFileVersionMS & 0xFFFF,
+                                                          info.dwFileVersionLS >> 16,
+                                                          info.dwFileVersionLS & 0xFFFF)
+        except (OSError, AttributeError, ValueError):
+            pass
+    else:
+        # The PyInstaller version file is Python syntax; extract its version tuple
+        # without executing the file.
+        try:
+            source = (Path(__file__).resolve().parent / 'version_info.txt').read_text(encoding='utf-8-sig')
+            match = re.search(r'\bfilevers\s*=\s*\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)', source)
+            if match:
+                return '.'.join(match.groups())
+        except OSError:
+            pass
+    return 'Unknown'
 
 
 def tray_image():
@@ -760,7 +822,7 @@ class StopwatchApp:
         container = ttk.Frame(dialog, padding=20)
         container.pack(fill='both', expand=True)
         ttk.Label(container, text=APP_NAME, font=('Segoe UI', 12, 'bold')).pack(pady=(0, 8))
-        ttk.Label(container, text=f'Version {APP_VERSION}').pack(pady=(0, 8))
+        ttk.Label(container, text=f'Version {get_app_version()}').pack(pady=(0, 8))
         ttk.Label(container, text='Written by Gal Shemesh (PacketLauncher)').pack(pady=(0, 12))
         link = tk.Label(container, text='github.com/packetlauncher', fg='#0066cc',
                         cursor='hand2', font=('Segoe UI', 10, 'underline'))
