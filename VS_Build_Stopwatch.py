@@ -1,4 +1,5 @@
 import ctypes
+import colorsys
 import json
 import os
 import queue
@@ -111,7 +112,9 @@ def load_settings():
     settings = {'size': 'Medium', 'delay': 3, 'position': 'Bottom right',
                 'solution_font': {'family': 'Segoe UI', 'size': 15, 'style': 'Bold'},
                 'project_font': {'family': 'Segoe UI', 'size': 13, 'style': 'Regular'},
-                'appearance': 'Instant', 'sound_success': '', 'sound_failure': ''}
+                'appearance': 'Instant', 'sound_success': '', 'sound_failure': '',
+                'mute_sounds': False, 'individual_project_stopwatches': True,
+                'start_stopwatches_minimized': False}
     try:
         saved = json.loads(CONFIG_PATH.read_text(encoding='utf-8'))
         if isinstance(saved, dict):
@@ -121,6 +124,12 @@ def load_settings():
                 settings['position'] = saved['position']
             if saved.get('appearance') in APPEARANCES:
                 settings['appearance'] = saved['appearance']
+            if type(saved.get('mute_sounds')) is bool:
+                settings['mute_sounds'] = saved['mute_sounds']
+            if type(saved.get('individual_project_stopwatches')) is bool:
+                settings['individual_project_stopwatches'] = saved['individual_project_stopwatches']
+            if type(saved.get('start_stopwatches_minimized')) is bool:
+                settings['start_stopwatches_minimized'] = saved['start_stopwatches_minimized']
             for key in SOUND_KEYS:
                 path = saved.get(key)
                 if isinstance(path, str) and len(path) <= 2048:
@@ -222,6 +231,22 @@ def tray_image():
         return icon.convert('RGBA').copy()
 
 
+def active_tray_image(blue_icon, hue=0.37):
+    """Recolor only the bright blue/cyan stopwatch metal; retain the navy dial and VS logo."""
+    green = blue_icon.copy().convert('RGBA')
+    pixels = []
+    for r, g, b, a in green.getdata():
+        h, saturation, value = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
+        # Blue/cyan highlights, excluding the dark navy face and purple VS symbol.
+        if a > 0 and 0.49 <= h <= 0.68 and saturation >= 0.22 and value >= 0.34:
+            new_r, new_g, new_b = colorsys.hsv_to_rgb(hue, saturation, value)
+            pixels.append((round(new_r * 255), round(new_g * 255), round(new_b * 255), a))
+        else:
+            pixels.append((r, g, b, a))
+    green.putdata(pixels)
+    return green
+
+
 # Keep Windows icon handles alive while their dialog windows exist.
 _window_icon_handles = []
 
@@ -258,9 +283,25 @@ def apply_window_icon(window):
         print('Could not set native-size title-bar icon:', exc, file=sys.stderr)
 
 
+class StopwatchTrayIcon(pystray.Icon):
+    """Keep tray left-click notifications away from ordinary menu actions."""
+
+    def _on_notify(self, wparam, lparam):
+        # Windows can send WM_LBUTTONUP (0x0202) and WM_LBUTTONDBLCLK
+        # (0x0203). Never let either select a checkable menu item.
+        if lparam == 0x0202:
+            self._toggle_callback()
+            return 0
+        if lparam == 0x0203:
+            return 0
+        return super()._on_notify(wparam, lparam)
+
 class StopwatchApp:
     def __init__(self):
         self.settings = load_settings()
+        self.overlays_hidden = False
+        self._last_work_area = None
+        self._next_work_area_check = 0.0
         self.root = tk.Tk()
         self.root.withdraw()
         apply_window_icon(self.root)
@@ -270,6 +311,12 @@ class StopwatchApp:
         self.counter = 0
         self.running = True
         self.tray = None
+        self._tray_running = False
+        self._tray_idle_icon = tray_image()
+        self._tray_active_icon = active_tray_image(self._tray_idle_icon)
+        self._tray_yellow_icon = active_tray_image(self._tray_idle_icon, hue=0.15)
+        self._tray_active_since = None
+        self._tray_last_phase = None
         self.font_dialog = None
         self.sound_dialog = None
         self.about_dialog = None
@@ -330,6 +377,10 @@ class StopwatchApp:
                     self.settings[key] = value
                     save_settings(self.settings)
                     self.refresh_layout()
+                    if self.tray is not None:
+                        self.tray.update_menu()
+                elif name == 'toggle_overlays':
+                    self.toggle_overlays()
                 elif name == 'font_dialog':
                     self.show_font_dialog()
                 elif name == 'sound_dialog':
@@ -349,12 +400,51 @@ class StopwatchApp:
             pass
         self.root.after(50, self.poll_events)
 
+    def toggle_overlays(self):
+        """Toggle overlay visibility without stopping builds or completion sounds."""
+        self.overlays_hidden = not self.overlays_hidden
+        if self.overlays_hidden:
+            for group in self.groups.values():
+                group['window'].withdraw()
+                # Cancel entry animation while hidden; don't animate offscreen.
+                if group['anim'] is not None and group['anim']['phase'] == 'enter':
+                    group['anim'] = None
+                group['shown'] = False
+        else:
+            # A user-requested restore must be immediate, not a new slide-in.
+            for group in self.groups.values():
+                group['shown'] = True
+                group['anim'] = None
+            self.refresh_layout()
+        if self.tray is not None:
+            self.tray.update_menu()
+
+    def refresh_tray_icon(self):
+        """Alternate green/yellow each second while counting; blue when idle."""
+        active = any(build['finished_at'] is None for build in self.builds.values())
+        now = time.monotonic()
+        if active != self._tray_running:
+            self._tray_running = active
+            self._tray_active_since = now if active else None
+            self._tray_last_phase = None
+        phase = int(now - self._tray_active_since) % 2 if active else -1
+        if phase != self._tray_last_phase:
+            self._tray_last_phase = phase
+            if self.tray is not None:
+                self.tray.icon = (self._tray_idle_icon if phase == -1 else
+                                  self._tray_yellow_icon if phase == 0 else
+                                  self._tray_active_icon)
+
     def start_build(self, build_id, project, kind='solution', parent=None):
         if build_id in self.builds:
             return
         if kind != 'project' or not isinstance(parent, str) or parent not in self.groups:
             kind, parent = 'solution', None
             group_id = build_id
+            # Apply the startup preference before the first overlay is created.
+            # This changes visibility only; it never changes the saved preference.
+            if not self.groups:
+                self.overlays_hidden = self.settings['start_stopwatches_minimized']
             window = tk.Toplevel(self.root)
             window.withdraw()
             window.overrideredirect(True)
@@ -398,7 +488,10 @@ class StopwatchApp:
             'row': row, 'label': label, 'status': status, 'clock': clock,
         }
         group['rows'].append(build_id)
+        self.refresh_tray_icon()
         self.refresh_layout()
+        if self.tray is not None:
+            self.tray.update_menu()
 
     def finish_build(self, build_id, success=True):
         build = self.builds.get(build_id)
@@ -408,14 +501,17 @@ class StopwatchApp:
         build['finished_at'] = time.monotonic()
         build['success'] = success
         self.refresh_build(build)
-        # Play one notification per solution build, never once per project.
-        if build['kind'] == 'solution' and not build_id.startswith('test-'):
+        self.refresh_tray_icon()
+        if self.tray is not None:
+            self.tray.update_menu()
+        # Play completion sounds for solution builds and test stopwatches, not child projects.
+        if build['kind'] == 'solution':
             self.play_completion_sound(success)
 
     def play_completion_sound(self, success):
         key = 'sound_success' if success else 'sound_failure'
         path = self.settings.get(key, '')
-        if path:
+        if path and not self.settings['mute_sounds']:
             self.play_audio(path)
 
     def play_audio(self, path, preview=False):
@@ -489,13 +585,30 @@ class StopwatchApp:
         regular = make_font('project_font')
         heading = make_font('solution_font')
         heights = []
+        show_projects = self.settings['individual_project_stopwatches']
         for group_id, group in self.groups.items():
+            # Rebuild the visible row order so projects can be revealed during
+            # a build without restarting their independently running timers.
+            for build_id in group['rows']:
+                build = self.builds.get(build_id)
+                if build:
+                    build['row'].pack_forget()
+            if group['divider'] is not None:
+                group['divider'].pack_forget()
+            visible_projects = False
             total_height = 0
             for build_id in group['rows']:
                 build = self.builds.get(build_id)
                 if not build:
                     continue
                 main = build['kind'] == 'solution'
+                if not main and not show_projects:
+                    continue
+                if not main and not visible_projects:
+                    visible_projects = True
+                    if group['divider'] is not None:
+                        group['divider'].pack(fill='x', padx=10, pady=(3, 3))
+                build['row'].pack(fill='x')
                 font = heading if main else regular
                 row_height = max(round(35 * scale), font.metrics('linespace') + 2 * pad_y)
                 build['row'].config(height=row_height, padx=pad_x, pady=pad_y)
@@ -518,22 +631,43 @@ class StopwatchApp:
                 build['status'].pack_configure(padx=(0, round(9 * scale)))
                 build['clock'].pack_configure(padx=(round(10 * scale), 0))
                 total_height += row_height
-            if group['divider'] is not None:
+            if visible_projects and group['divider'] is not None:
                 total_height += round(7 * scale)
             total_height += 2
             heights.append((group_id, total_height))
+        # Pack complete solution panels into columns without overlapping them.
+        # The first column is anchored to the selected corner; each new column
+        # extends inward horizontally when the current one runs out of height.
+        usable_height = max(1, bottom - top - 2 * margin)
+        column = 0
         offset = 0
         for group_id, height in heights:
             group = self.groups[group_id]
-            x = left + margin if position.endswith('left') else right - width - margin
+            if offset and offset + height > usable_height:
+                column += 1
+                offset = 0
+            column_step = width + gap
+            if position.endswith('left'):
+                x = left + margin + column * column_step
+            else:
+                x = right - margin - width - column * column_step
             if position.startswith('Top'):
                 y = top + margin + offset
             else:
                 y = bottom - margin - height - offset
             offset += height + gap
+            # Keep the panel inside the work area even when a single panel
+            # exceeds the available height, or the screen has no more columns.
+            x = max(left, min(x, right - width))
+            y = max(top, min(y, bottom - height))
             win = group['window']
             x, y = max(left, x), max(top, y)
             group.update(target_x=x, y=y, width=width, height=height)
+            if self.overlays_hidden:
+                win.withdraw()
+                group['x'] = x
+                group['shown'] = False
+                continue
             if not group['shown']:
                 group['shown'] = True
                 if self.settings['appearance'] == 'Slide':
@@ -582,7 +716,8 @@ class StopwatchApp:
             progress = min(1.0, (now - anim['since']) / ANIMATION_SECONDS)
             eased = 1.0 - (1.0 - progress) ** 3
             group['x'] = anim['start'] + (anim['end'] - anim['start']) * eased
-            self.place_group(group)
+            if not self.overlays_hidden:
+                self.place_group(group)
             if progress >= 1.0:
                 group['anim'] = None
                 if anim['phase'] == 'exit':
@@ -596,6 +731,17 @@ class StopwatchApp:
         if not self.running:
             return
         now = time.monotonic()
+        self.refresh_tray_icon()
+        # Windows updates SPI_GETWORKAREA when the taskbar is moved or resized.
+        # Poll periodically because Tk does not receive all shell work-area events.
+        if now >= self._next_work_area_check:
+            self._next_work_area_check = now + 0.25
+            area = self.work_area()
+            if area != self._last_work_area:
+                previous = self._last_work_area
+                self._last_work_area = area
+                if previous is not None and self.groups:
+                    self.refresh_layout()
         for build in list(self.builds.values()):
             self.refresh_build(build)
 
@@ -610,7 +756,7 @@ class StopwatchApp:
             completed_at = max(build['finished_at'] for build in rows)
             if now - completed_at < self.settings['delay']:
                 continue
-            if self.settings['appearance'] == 'Slide':
+            if self.settings['appearance'] == 'Slide' and not self.overlays_hidden:
                 if not group['exit_pending']:
                     group['exit_pending'] = True
                     self.begin_animation(group, group['x'],
@@ -631,8 +777,15 @@ class StopwatchApp:
 
     def finish_tests(self):
         for build_id, build in list(self.builds.items()):
-            if build['finished_at'] is None:
+            if build_id.startswith('test-') and build['finished_at'] is None:
                 self.enqueue('finish', build_id, True)
+
+    def has_running_tests(self):
+        return any(build_id.startswith('test-') and build['finished_at'] is None
+                   for build_id, build in self.builds.items())
+
+    def has_running_jobs(self):
+        return any(build['finished_at'] is None for build in self.builds.values())
 
     def menu(self):
         item = pystray.MenuItem
@@ -659,7 +812,8 @@ class StopwatchApp:
                                     for sec in (0, 1, 2, 3, 5, 10, 15, 30, 60)))
         return pystray.Menu(
             item('Start test stopwatch', lambda icon, entry: self.start_test()),
-            item('Finish all test stopwatches', lambda icon, entry: self.finish_tests()),
+            item('Finish all test stopwatches', lambda icon, entry: self.finish_tests(),
+                 enabled=lambda entry: self.has_running_tests()),
             pystray.Menu.SEPARATOR,
             item('Overlay size', size_menu),
             item('Customize fonts...', lambda icon, entry: self.enqueue('font_dialog')),
@@ -667,6 +821,18 @@ class StopwatchApp:
             item('Disappear after', delay_menu),
             item('Overlay position', position_menu),
             item('Appearance animation', appearance_menu),
+            item('Individual project stopwatches',
+                 lambda icon, entry: self.enqueue('setting', 'individual_project_stopwatches',
+                                                  not self.settings['individual_project_stopwatches']),
+                 checked=lambda entry: self.settings['individual_project_stopwatches']),
+            item('Start stopwatches minimized',
+                 lambda icon, entry: self.enqueue('setting', 'start_stopwatches_minimized',
+                                                  not self.settings['start_stopwatches_minimized']),
+                 checked=lambda entry: self.settings['start_stopwatches_minimized']),
+            pystray.Menu.SEPARATOR,
+            item(lambda entry: 'Maximize stopwatches' if self.overlays_hidden else 'Minimize stopwatches',
+                 lambda icon, entry: self.enqueue('toggle_overlays'),
+                 visible=lambda entry: self.has_running_jobs(), default=True),
             pystray.Menu.SEPARATOR,
             item('About...', lambda icon, entry: self.enqueue('about_dialog')),
             item('Exit', lambda icon, entry: self.enqueue('quit')),
@@ -781,8 +947,11 @@ class StopwatchApp:
             ttk.Button(controls, text='Browse...', command=browse).pack(side='left')
             ttk.Button(controls, text='Test', command=preview).pack(side='left', padx=(6, 0))
             ttk.Button(controls, text='Clear', command=lambda v=var: v.set('')).pack(side='left', padx=(6, 0))
+        mute_var = tk.BooleanVar(value=self.settings['mute_sounds'])
+        ttk.Checkbutton(container, text='Mute sounds', variable=mute_var).grid(
+            row=3, column=0, columnspan=3, sticky='w', pady=(10, 0))
         buttons = ttk.Frame(container)
-        buttons.grid(row=3, column=0, columnspan=3, sticky='e', pady=(14, 0))
+        buttons.grid(row=4, column=0, columnspan=3, sticky='e', pady=(14, 0))
         def save():
             result = {key: os.path.normpath(var.get().strip().strip('"')) if var.get().strip().strip('"') else ''
                       for key, var in values.items()}
@@ -794,6 +963,7 @@ class StopwatchApp:
                                          parent=dialog)
                     return
             self.settings.update(result)
+            self.settings['mute_sounds'] = mute_var.get()
             save_settings(self.settings)
             dialog.destroy()
         ttk.Button(buttons, text='Cancel', command=dialog.destroy).pack(side='right', padx=(8, 0))
@@ -844,7 +1014,8 @@ class StopwatchApp:
         self.root.quit()
 
     def run(self):
-        self.tray = pystray.Icon('VSBuildStopwatch', tray_image(), APP_NAME, self.menu())
+        self.tray = StopwatchTrayIcon('VSBuildStopwatch', self._tray_yellow_icon if self._tray_running else self._tray_idle_icon, APP_NAME, self.menu())
+        self.tray._toggle_callback = lambda: self.enqueue('toggle_overlays')
         thread = threading.Thread(target=self.tray.run, daemon=True)
         thread.start()
         self.root.mainloop()

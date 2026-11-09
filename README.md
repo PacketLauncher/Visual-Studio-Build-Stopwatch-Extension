@@ -3,6 +3,18 @@
 A lightweight Windows system tray utility that displays live build timers for Visual Studio solutions and projects.
 
 ## Changelog
+v1.0.0.2
+November 9, 2026
+- Fixed the 'Finish all test stopwatches' option to affect only test stopwatches (previously affected all running ones).
+- Fixed overlay positioning when the Windows taskbar is resized or moved.
+- Added multi-column overlay positioning when the available vertical space is full.
+- Added an animated yellow/green tray icon while builds are running.
+- Added a minimize/maximize option to hide/show running stopwatches (also accessible by left-clicking the tray icon).
+- Added a 'Start stopwatches minimized' option.
+- Added an 'Individual project stopwatches' toggle to show/hide individual project timers beneath their corresponding solution timers.
+- Added a 'Mute sounds' option so users no longer need to clear their configured sound file paths.
+- Added completion sound playback for test stopwatches.
+
 v1.0.0.1
 November 6, 2026
 - Fixed Solution and project build timers to follow their respective font settings, including font family, size, and style (Regular, Bold, Italic, or Bold Italic).
@@ -14,10 +26,10 @@ November 6, 2026
 ## Requirements
 
 - Windows 10 or Windows 11
-- Visual Studio 2026 (may work in previous versions but not tested)
+- Visual Studio 2026
 - No Python installation required
 
-**Note:** Visual Studio 2026 is the intended release target. Compatibility with earlier Visual Studio versions has not been tested.
+**Note:** Visual Studio 2026 is the intended release target. Compatibility with earlier Visual Studio versions may work but has not been tested.
 
 ## Installation
 
